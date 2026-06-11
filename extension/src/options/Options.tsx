@@ -225,7 +225,12 @@ export function Options() {
       </section>
 
       <footer className="page-footer">
-        <span>MirrorMe</span>
+        <span>
+          Created by{' '}
+          <a href="https://www.linkedin.com/in/maia-salti/" target="_blank" rel="noreferrer">
+            Maia Salti
+          </a>
+        </span>
         <span>
           Questions? <a href="mailto:maia.salti@gmail.com">maia.salti@gmail.com</a>
         </span>
