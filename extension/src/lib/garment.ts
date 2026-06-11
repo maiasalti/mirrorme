@@ -4,13 +4,15 @@ const MAX_BYTES = 15 * 1024 * 1024
 
 export type ImagePart = { data: string; mimeType: string } // base64 (no prefix)
 
-export function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve((reader.result as string).split(',', 2)[1])
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(blob)
-  })
+// No FileReader here: this must also run in the MV3 service worker.
+export async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  let binary = ''
+  const CHUNK = 0x8000
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
 }
 
 export function parseDataUrl(url: string): ImagePart {

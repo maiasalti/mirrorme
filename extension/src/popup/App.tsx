@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getPhoto, getTryon, listPhotos, putTryon } from '../lib/db'
-import { blobToBase64, getGarmentImage } from '../lib/garment'
-import { generateTryOn } from '../lib/gemini'
-import type { PendingGarment } from '../lib/messages'
+import { getTryon, listPhotos } from '../lib/db'
+import type { GenerationState, PendingGarment } from '../lib/messages'
 import { sendMessage } from '../lib/messages'
 import { getSettings } from '../lib/settings'
 
@@ -12,6 +10,10 @@ type Base =
 
 type PhotoView = { id: string; url: string }
 type Result = { id: string; url: string }
+
+// A 'running' generation older than this is assumed dead (service worker
+// killed mid-flight) and shown as an error instead of an eternal spinner.
+const GENERATION_TIMEOUT_MS = 120_000
 
 const openLookbook = () =>
   chrome.tabs.create({ url: chrome.runtime.getURL('src/options/index.html#lookbook') })
@@ -27,6 +29,31 @@ export function App() {
   const [result, setResult] = useState<Result | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  const applyGenerationState = useCallback(async (gen: GenerationState | undefined) => {
+    if (!gen) {
+      setGenerating(false)
+      return
+    }
+    if (gen.status === 'running') {
+      if (Date.now() - gen.startedAt > GENERATION_TIMEOUT_MS) {
+        setGenerating(false)
+        setError('That one took too long and was lost — try again.')
+        chrome.storage.session.remove('generation')
+      } else {
+        setGenerating(true)
+      }
+      return
+    }
+    setGenerating(false)
+    if (gen.status === 'error') {
+      setError(gen.message)
+      chrome.storage.session.remove('generation')
+      return
+    }
+    const rec = await getTryon(gen.tryonId)
+    if (rec) setResult({ id: rec.id, url: URL.createObjectURL(rec.blob) })
+  }, [])
+
   const load = useCallback(async () => {
     const settings = await getSettings()
     setHasKey(Boolean(settings.geminiApiKey))
@@ -37,23 +64,28 @@ export function App() {
 
     const { baseOverride } = await chrome.storage.session.get('baseOverride')
     const override = baseOverride as { kind: 'tryon'; id: string } | undefined
+    let appliedOverride = false
     if (override) {
       const rec = await getTryon(override.id)
       if (rec) {
         setBase({ kind: 'tryon', id: rec.id, url: URL.createObjectURL(rec.blob) })
-        setReady(true)
-        return
+        appliedOverride = true
+      } else {
+        await chrome.storage.session.remove('baseOverride')
       }
-      await chrome.storage.session.remove('baseOverride')
     }
-    const def =
-      photoRecs.find((p) => p.id === settings.defaultPhotoId) ?? photoRecs[0]
-    if (def) {
-      const view = views.find((v) => v.id === def.id)!
-      setBase({ kind: 'photo', id: view.id, url: view.url })
+    if (!appliedOverride) {
+      const def = photoRecs.find((p) => p.id === settings.defaultPhotoId) ?? photoRecs[0]
+      if (def) {
+        const view = views.find((v) => v.id === def.id)!
+        setBase({ kind: 'photo', id: view.id, url: view.url })
+      }
     }
+
+    const { generation } = await chrome.storage.session.get('generation')
+    await applyGenerationState(generation as GenerationState | undefined)
     setReady(true)
-  }, [])
+  }, [applyGenerationState])
 
   useEffect(() => {
     load().catch((e) => setError((e as Error).message))
@@ -74,51 +106,27 @@ export function App() {
         setPending((changes.pendingGarment.newValue as PendingGarment) ?? null)
       }
       if (changes.autoDetectFailed) setAutoFailed(Boolean(changes.autoDetectFailed.newValue))
+      if (changes.generation) {
+        applyGenerationState(changes.generation.newValue as GenerationState | undefined)
+      }
     }
     chrome.storage.onChanged.addListener(onChange)
     return () => chrome.storage.onChanged.removeListener(onChange)
-  }, [load])
+  }, [load, applyGenerationState])
 
-  async function handleTryOn() {
+  function handleTryOn() {
     if (!base || !pending) return
     setError(null)
-    setGenerating(true)
-    try {
-      const settings = await getSettings()
-      if (!settings.geminiApiKey) throw new Error('Add your Gemini API key in settings first.')
-
-      const baseRec = base.kind === 'photo' ? await getPhoto(base.id) : await getTryon(base.id)
-      if (!baseRec) throw new Error('Base image is missing — pick another one.')
-
-      const [garment, baseData] = await Promise.all([
-        getGarmentImage(pending.url),
-        blobToBase64(baseRec.blob),
-      ])
-
-      const blob = await generateTryOn({
-        apiKey: settings.geminiApiKey,
-        base: { data: baseData, mimeType: baseRec.blob.type || 'image/jpeg' },
-        garment,
-        chained: base.kind === 'tryon',
-      })
-
-      const id = crypto.randomUUID()
-      await putTryon({
-        id,
-        createdAt: Date.now(),
-        garmentSource: pending.url.startsWith('data:') ? 'data:(captured image)' : pending.url,
-        parentTryonId: base.kind === 'tryon' ? base.id : null,
-        basePhotoId: base.kind === 'photo' ? base.id : null,
-        blob,
-      })
-      setResult({ id, url: URL.createObjectURL(blob) })
-      setPending(null)
-      sendMessage({ type: 'CLEAR_PENDING_GARMENT' }).catch(() => {})
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
+    setGenerating(true) // optimistic; background sets the canonical state
+    sendMessage({
+      type: 'GENERATE',
+      baseKind: base.kind,
+      baseId: base.id,
+      garmentUrl: pending.url,
+    }).catch(() => {
       setGenerating(false)
-    }
+      setError('Could not start generation — reload the extension and try again.')
+    })
   }
 
   async function useAsBase() {
@@ -126,11 +134,17 @@ export function App() {
     setBase({ kind: 'tryon', id: result.id, url: result.url })
     setResult(null)
     await chrome.storage.session.set({ baseOverride: { kind: 'tryon', id: result.id } })
+    await chrome.storage.session.remove('generation')
   }
 
   async function pickPhotoBase(p: PhotoView) {
     setBase({ kind: 'photo', id: p.id, url: p.url })
     await chrome.storage.session.remove('baseOverride')
+  }
+
+  async function dismissResult() {
+    setResult(null)
+    await chrome.storage.session.remove('generation')
   }
 
   function startManualSelect() {
@@ -202,10 +216,22 @@ export function App() {
                   <button className="btn btn--accent" onClick={useAsBase}>
                     + Add another piece
                   </button>
-                  <button className="btn btn--ghost" onClick={openLookbook}>
-                    Saved to lookbook
+                  <button className="btn btn--ghost" onClick={dismissResult}>
+                    Try something else
                   </button>
                 </div>
+                <p className="muted" style={{ marginTop: 8, textAlign: 'center' }}>
+                  Saved to{' '}
+                  <a
+                    href="#lookbook"
+                    onClick={(e) => {
+                      e.preventDefault()
+                      openLookbook()
+                    }}
+                  >
+                    your lookbook
+                  </a>
+                </p>
               </section>
             ) : (
               <>
@@ -230,6 +256,7 @@ export function App() {
                     className="btn btn--ghost"
                     style={{ marginTop: 8 }}
                     onClick={startManualSelect}
+                    disabled={generating}
                   >
                     {pending ? 'Pick a different garment' : 'Click the garment on the page'}
                   </button>
@@ -237,17 +264,23 @@ export function App() {
 
                 <button
                   className="btn btn--accent"
-                  disabled={!base || !pending || generating}
+                  disabled={!base || (!pending && !generating) || generating}
                   onClick={handleTryOn}
                 >
                   {generating ? (
                     <>
-                      <span className="spinner" /> Stitching you in… keep this open
+                      <span className="spinner" /> Stitching you in…
                     </>
                   ) : (
                     'Try it on'
                   )}
                 </button>
+                {generating && (
+                  <p className="muted" style={{ marginTop: 8, textAlign: 'center' }}>
+                    Feel free to close this — your look will be here and in the
+                    lookbook when it&apos;s done.
+                  </p>
+                )}
               </>
             )}
           </>

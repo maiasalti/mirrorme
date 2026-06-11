@@ -16,6 +16,15 @@ export type Msg =
   | { type: 'AUTO_DETECT_FAILED' } // content → background → popup may prompt manual
   | { type: 'GET_PENDING_GARMENT' } // popup → background
   | { type: 'CLEAR_PENDING_GARMENT' } // popup → background
+  // popup → background: run the try-on in the service worker so the popup can
+  // close (clicking the page closes popups) without aborting generation.
+  | { type: 'GENERATE'; baseKind: 'photo' | 'tryon'; baseId: string; garmentUrl: string }
+
+/** Lives in chrome.storage.session under `generation`; popup renders from it. */
+export type GenerationState =
+  | { status: 'running'; startedAt: number }
+  | { status: 'done'; tryonId: string; at: number }
+  | { status: 'error'; message: string; at: number }
 
 export type GetPendingResponse = { pending: PendingGarment | null }
 

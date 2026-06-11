@@ -85,12 +85,24 @@ export async function generateTryOn(opts: {
   }
 
   const body = await res.json()
-  const image = extractImage(body?.candidates?.[0]?.content?.parts)
+  const candidate = body?.candidates?.[0]
+  const image = extractImage(candidate?.content?.parts)
   if (!image) {
-    const text: string | undefined = body?.candidates?.[0]?.content?.parts?.find(
+    const reason: string | undefined =
+      body?.promptFeedback?.blockReason ?? candidate?.finishReason
+    if (reason && reason !== 'STOP') {
+      throw new Error(
+        `Gemini declined this one (${reason}). Swimwear and skin-heavy photos ` +
+          'often trip its safety filter — a flat product shot of just the ' +
+          'garment usually works better.'
+      )
+    }
+    const text: string | undefined = candidate?.content?.parts?.find(
       (p: RestPart) => p.text
     )?.text
-    throw new Error(text ? `No image returned: ${text.slice(0, 160)}` : 'No image returned — try again.')
+    throw new Error(
+      text ? `No image returned: ${text.slice(0, 160)}` : 'No image returned — try again.'
+    )
   }
   return base64ToBlob(image.data, image.mimeType)
 }
