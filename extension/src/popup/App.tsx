@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getTryon, listPhotos } from '../lib/db'
 import type { GenerationState, PendingGarment } from '../lib/messages'
 import { sendMessage } from '../lib/messages'
@@ -28,8 +28,10 @@ export function App() {
   const [generating, setGenerating] = useState(false)
   const [result, setResult] = useState<Result | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const staleTimer = useRef<number | undefined>(undefined)
 
   const applyGenerationState = useCallback(async (gen: GenerationState | undefined) => {
+    clearTimeout(staleTimer.current)
     if (!gen) {
       setGenerating(false)
       return
@@ -41,17 +43,35 @@ export function App() {
         chrome.storage.session.remove('generation')
       } else {
         setGenerating(true)
+        // No storage event fires if the service worker dies mid-run — recheck
+        // at the deadline so an open popup can't spin forever.
+        staleTimer.current = window.setTimeout(
+          () =>
+            chrome.storage.session
+              .get('generation')
+              .then(({ generation }) =>
+                applyGenerationState(generation as GenerationState | undefined)
+              ),
+          gen.startedAt + GENERATION_TIMEOUT_MS - Date.now() + 500
+        )
       }
       return
     }
-    setGenerating(false)
     if (gen.status === 'error') {
+      setGenerating(false)
       setError(gen.message)
       chrome.storage.session.remove('generation')
       return
     }
     const rec = await getTryon(gen.tryonId)
-    if (rec) setResult({ id: rec.id, url: URL.createObjectURL(rec.blob) })
+    if (rec) {
+      setResult({ id: rec.id, url: URL.createObjectURL(rec.blob) })
+    } else {
+      // Result was deleted (lookbook / "delete everything") — drop the state
+      // instead of re-failing on every popup open.
+      chrome.storage.session.remove('generation')
+    }
+    setGenerating(false)
   }, [])
 
   const load = useCallback(async () => {
@@ -84,18 +104,38 @@ export function App() {
 
     const { generation } = await chrome.storage.session.get('generation')
     await applyGenerationState(generation as GenerationState | undefined)
-    setReady(true)
   }, [applyGenerationState])
 
   useEffect(() => {
-    load().catch((e) => setError((e as Error).message))
+    let cancelled = false // StrictMode double-mount guard
 
-    sendMessage<{ pending: PendingGarment | null }>({ type: 'GET_PENDING_GARMENT' }).then(
-      (res) => {
-        setPending(res?.pending ?? null)
-        if (!res?.pending) sendMessage({ type: 'AUTO_DETECT' }).catch(() => {})
-      }
-    )
+    load()
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setReady(true)) // never strand the popup on "Loading…"
+
+    Promise.all([
+      sendMessage<{ pending: PendingGarment | null }>({ type: 'GET_PENDING_GARMENT' }),
+      chrome.tabs.query({ active: true, currentWindow: true }),
+    ])
+      .then(([res, [tab]]) => {
+        if (cancelled) return
+        const p = res?.pending ?? null
+        // A garment selected on a different page is stale — drop it and
+        // re-detect for the page the user is actually on.
+        const stale = p && tab?.url && p.pageUrl && p.pageUrl !== tab.url
+        if (p && !stale) {
+          setPending(p)
+          return
+        }
+        setPending(null)
+        if (stale) sendMessage({ type: 'CLEAR_PENDING_GARMENT' }).catch(() => {})
+        sendMessage({ type: 'AUTO_DETECT' }).catch(() => {})
+      })
+      .catch(() => {
+        if (cancelled) return
+        setPending(null)
+        setAutoFailed(true)
+      })
 
     const onChange = (
       changes: Record<string, chrome.storage.StorageChange>,
@@ -111,22 +151,33 @@ export function App() {
       }
     }
     chrome.storage.onChanged.addListener(onChange)
-    return () => chrome.storage.onChanged.removeListener(onChange)
+    return () => {
+      cancelled = true
+      clearTimeout(staleTimer.current)
+      chrome.storage.onChanged.removeListener(onChange)
+    }
   }, [load, applyGenerationState])
 
   function handleTryOn() {
     if (!base || !pending) return
     setError(null)
     setGenerating(true) // optimistic; background sets the canonical state
-    sendMessage({
+    sendMessage<{ ok: boolean; error?: string }>({
       type: 'GENERATE',
       baseKind: base.kind,
       baseId: base.id,
       garmentUrl: pending.url,
-    }).catch(() => {
-      setGenerating(false)
-      setError('Could not start generation — reload the extension and try again.')
     })
+      .then((res) => {
+        if (res && !res.ok) {
+          setGenerating(false)
+          setError(res.error ?? 'Could not start generation.')
+        }
+      })
+      .catch(() => {
+        setGenerating(false)
+        setError('Could not start generation — reload the extension and try again.')
+      })
   }
 
   async function useAsBase() {
@@ -143,6 +194,7 @@ export function App() {
   }
 
   async function dismissResult() {
+    if (result) URL.revokeObjectURL(result.url)
     setResult(null)
     await chrome.storage.session.remove('generation')
   }
@@ -264,7 +316,7 @@ export function App() {
 
                 <button
                   className="btn btn--accent"
-                  disabled={!base || (!pending && !generating) || generating}
+                  disabled={!base || !pending || generating}
                   onClick={handleTryOn}
                 >
                   {generating ? (

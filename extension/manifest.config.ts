@@ -15,6 +15,9 @@ import pkg from './package.json'
 export function makeManifest(env: Record<string, string | undefined>) {
   return defineManifest({
     manifest_version: 3,
+    // Chrome 120 removed the two SW kill rules (>5min task, >30s fetch) that
+    // could otherwise terminate a generation mid-flight despite the heartbeat.
+    minimum_chrome_version: '120',
     name: 'MirrorMe — virtual try-on',
     version: pkg.version,
     description:

@@ -24,6 +24,8 @@ export async function setDefaultPhotoId(id: string | null): Promise<void> {
 }
 
 export async function clearSettings(): Promise<void> {
-  await chrome.storage.local.clear()
+  // Remove our keys explicitly rather than clear() — a blanket clear would
+  // silently nuke any future local-storage keys too.
+  await chrome.storage.local.remove(['geminiApiKey', 'defaultPhotoId'])
   await chrome.storage.session.clear()
 }

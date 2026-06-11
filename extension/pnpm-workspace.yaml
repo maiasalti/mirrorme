@@ -1,2 +1,5 @@
 allowBuilds:
   esbuild: true
+# pnpm 10 compatibility (same approval, older key)
+onlyBuiltDependencies:
+  - esbuild

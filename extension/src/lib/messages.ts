@@ -20,11 +20,15 @@ export type Msg =
   // close (clicking the page closes popups) without aborting generation.
   | { type: 'GENERATE'; baseKind: 'photo' | 'tryon'; baseId: string; garmentUrl: string }
 
-/** Lives in chrome.storage.session under `generation`; popup renders from it. */
+/**
+ * Lives in chrome.storage.session under `generation`; popup renders from it.
+ * runId gives each run an identity so a stale/superseded run can never
+ * clobber a newer one's state (and a wiped session can't be repopulated).
+ */
 export type GenerationState =
-  | { status: 'running'; startedAt: number }
-  | { status: 'done'; tryonId: string; at: number }
-  | { status: 'error'; message: string; at: number }
+  | { status: 'running'; runId: string; startedAt: number }
+  | { status: 'done'; runId: string; tryonId: string; at: number }
+  | { status: 'error'; runId: string; message: string; at: number }
 
 export type GetPendingResponse = { pending: PendingGarment | null }
 

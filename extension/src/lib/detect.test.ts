@@ -27,8 +27,19 @@ describe('pickFromSrcset', () => {
     expect(pickFromSrcset('   ')).toBeNull()
   })
 
-  it('survives URLs with commas in query strings (space-separated entries)', () => {
-    expect(pickFromSrcset('a.jpg?w=1 100w, b.jpg?w=2 900w')).toBe('b.jpg?w=2')
+  it('survives commas INSIDE URLs (Cloudinary/imgix transforms)', () => {
+    expect(
+      pickFromSrcset(
+        'https://cdn.com/c_fill,w_600/p.jpg 600w, https://cdn.com/c_fill,w_1200/p.jpg 1200w'
+      )
+    ).toBe('https://cdn.com/c_fill,w_1200/p.jpg')
+    expect(pickFromSrcset('https://x.imgix.net/p.jpg?rect=0,0,800,600&w=900 900w')).toBe(
+      'https://x.imgix.net/p.jpg?rect=0,0,800,600&w=900'
+    )
+  })
+
+  it('handles comma-terminated URLs without descriptors', () => {
+    expect(pickFromSrcset('a.jpg, b.jpg 800w')).toBe('b.jpg')
   })
 })
 
@@ -118,6 +129,13 @@ describe('parseJsonLdProductImage', () => {
       '@graph': [{ '@type': 'WebSite' }, { '@type': 'Product', image: ['g.jpg'] }],
     })
     expect(parseJsonLdProductImage(doc)).toBe('g.jpg')
+  })
+
+  it('finds Product inside @graph wrapped in a root array (Yoast style)', () => {
+    const doc = JSON.stringify([
+      { '@context': 'https://schema.org', '@graph': [{ '@type': 'Product', image: 'y.jpg' }] },
+    ])
+    expect(parseJsonLdProductImage(doc)).toBe('y.jpg')
   })
 
   it('handles @type arrays', () => {

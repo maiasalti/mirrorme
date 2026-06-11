@@ -3,21 +3,44 @@
  * be unit-tested. The content script wires these to the live page.
  */
 
+/**
+ * Parse srcset per the HTML spec's tokenization: a URL runs to whitespace; a
+ * trailing comma on the URL ends the entry. This survives commas INSIDE
+ * URLs (Cloudinary `c_fill,w_600/...`, imgix `rect=0,0,...`), which a naive
+ * split(',') corrupts.
+ */
+export function parseSrcset(srcset: string): { url: string; descriptor: string }[] {
+  const out: { url: string; descriptor: string }[] = []
+  let i = 0
+  while (i < srcset.length) {
+    while (i < srcset.length && /[\s,]/.test(srcset[i])) i++ // skip separators
+    let start = i
+    while (i < srcset.length && !/\s/.test(srcset[i])) i++
+    let url = srcset.slice(start, i)
+    if (!url) break
+    let descriptor = ''
+    if (/,$/.test(url)) {
+      url = url.replace(/,+$/, '') // comma terminates the entry — no descriptor
+    } else {
+      while (i < srcset.length && /\s/.test(srcset[i])) i++
+      start = i
+      while (i < srcset.length && srcset[i] !== ',') i++
+      descriptor = srcset.slice(start, i).trim()
+      i++ // past the comma
+    }
+    if (url) out.push({ url, descriptor })
+  }
+  return out
+}
+
 /** Largest candidate from a srcset string (w descriptors, then x density). */
 export function pickFromSrcset(srcset: string): string | null {
-  const entries = srcset
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-
   let bestUrl: string | null = null
   let bestScore = -1
-  for (const entry of entries) {
-    const [url, descriptor] = entry.split(/\s+/)
-    if (!url) continue
+  for (const { url, descriptor } of parseSrcset(srcset)) {
     let score = 0
-    if (descriptor?.endsWith('w')) score = parseFloat(descriptor)
-    else if (descriptor?.endsWith('x')) score = parseFloat(descriptor) * 1000
+    if (descriptor.endsWith('w')) score = parseFloat(descriptor)
+    else if (descriptor.endsWith('x')) score = parseFloat(descriptor) * 1000
     if (score > bestScore) {
       bestScore = score
       bestUrl = url
@@ -82,7 +105,7 @@ function imageFromNode(node: JsonLdNode): string | null {
   return null
 }
 
-/** Product.image from a JSON-LD script body (handles @graph and arrays). */
+/** Product.image from a JSON-LD script body (handles @graph and arrays, at any nesting). */
 export function parseJsonLdProductImage(jsonText: string): string | null {
   let doc: unknown
   try {
@@ -90,17 +113,18 @@ export function parseJsonLdProductImage(jsonText: string): string | null {
   } catch {
     return null
   }
-  const nodes: JsonLdNode[] = []
-  const root = doc as JsonLdNode
-  if (Array.isArray(doc)) nodes.push(...(doc as JsonLdNode[]))
-  else if (root && typeof root === 'object') {
-    nodes.push(root)
-    if (Array.isArray(root['@graph'])) nodes.push(...(root['@graph'] as JsonLdNode[]))
-  }
-  for (const node of nodes) {
-    if (!node || typeof node !== 'object') continue
+  const queue: unknown[] = [doc]
+  while (queue.length) {
+    const item = queue.shift()
+    if (Array.isArray(item)) {
+      queue.push(...item)
+      continue
+    }
+    if (!item || typeof item !== 'object') continue
+    const node = item as JsonLdNode
     const image = imageFromNode(node)
     if (image) return image
+    if (Array.isArray(node['@graph'])) queue.push(...(node['@graph'] as unknown[]))
   }
   return null
 }

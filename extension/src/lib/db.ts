@@ -26,13 +26,32 @@ function openDb(): Promise<IDBDatabase> {
         if (!db.objectStoreNames.contains('photos')) db.createObjectStore('photos', { keyPath: 'id' })
         if (!db.objectStoreNames.contains('tryons')) db.createObjectStore('tryons', { keyPath: 'id' })
       }
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
+      req.onsuccess = () => {
+        const db = req.result
+        // Invalidate the cache if Chrome force-closes the connection or a
+        // future version upgrade needs us out of the way.
+        db.onclose = () => {
+          dbPromise = null
+        }
+        db.onversionchange = () => {
+          db.close()
+          dbPromise = null
+        }
+        resolve(db)
+      }
+      req.onblocked = () => reject(new Error('Local database is blocked by another MirrorMe page'))
+      req.onerror = () => {
+        dbPromise = null // don't cache a failed open
+        reject(req.error)
+      }
     })
   }
   return dbPromise
 }
 
+// Resolves on transaction COMMIT, not request success — a readwrite
+// transaction can still abort after the request "succeeds" (e.g.
+// QuotaExceededError at commit time with multi-MB blobs).
 function tx<T>(
   store: 'photos' | 'tryons',
   mode: IDBTransactionMode,
@@ -41,9 +60,16 @@ function tx<T>(
   return openDb().then(
     (db) =>
       new Promise<T>((resolve, reject) => {
-        const req = fn(db.transaction(store, mode).objectStore(store))
-        req.onsuccess = () => resolve(req.result)
-        req.onerror = () => reject(req.error)
+        const t = db.transaction(store, mode)
+        const req = fn(t.objectStore(store))
+        let result: T
+        req.onsuccess = () => {
+          result = req.result
+        }
+        t.oncomplete = () => resolve(result)
+        t.onerror = () => reject(t.error ?? req.error)
+        t.onabort = () =>
+          reject(t.error ?? new Error('Local storage transaction aborted (out of disk space?)'))
       })
   )
 }

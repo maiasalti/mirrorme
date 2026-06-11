@@ -75,11 +75,25 @@ export async function generateTryOn(opts: {
   if (!res.ok) {
     const body = await res.json().catch(() => null)
     const apiMessage: string | undefined = body?.error?.message
-    if (res.status === 400 && /api key/i.test(apiMessage ?? '')) {
+    const reasons: string[] = (body?.error?.details ?? [])
+      .map((d: { reason?: string }) => d?.reason)
+      .filter(Boolean)
+    const keyProblem =
+      reasons.some((r) => r.startsWith('API_KEY')) || /api key/i.test(apiMessage ?? '')
+    if ((res.status === 400 || res.status === 403) && keyProblem) {
       throw new Error('Your Gemini API key was rejected — check it in MirrorMe settings.')
+    }
+    if (res.status === 403) {
+      throw new Error(
+        'Your Gemini key is not authorized for this API (revoked, restricted, or the ' +
+          'Generative Language API is disabled) — make a fresh key at aistudio.google.com.'
+      )
     }
     if (res.status === 429) {
       throw new Error('Gemini rate/quota limit hit — wait a moment, or check billing on your key.')
+    }
+    if (res.status === 500 || res.status === 503) {
+      throw new Error('Gemini is overloaded right now — try again in a minute.')
     }
     throw new Error(apiMessage ?? `Generation failed (${res.status}).`)
   }

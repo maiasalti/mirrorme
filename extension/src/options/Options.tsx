@@ -7,6 +7,7 @@ import {
   listTryons,
   putPhoto,
 } from '../lib/db'
+import { normalizeImage } from '../lib/image'
 import {
   clearSettings,
   getSettings,
@@ -27,34 +28,54 @@ export function Options() {
   const [tryons, setTryons] = useState<TryonView[]>([])
   const [error, setError] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  // The options page is long-lived and reloads on every mutation — revoke the
+  // previous render's object URLs or the blobs stay pinned until tab close.
+  const liveUrls = useRef<string[]>([])
 
   const load = useCallback(async () => {
     const settings = await getSettings()
     setKeySaved(Boolean(settings.geminiApiKey))
     const photoRecs = await listPhotos()
+    const tryonRecs = await listTryons()
+
+    const nextUrls: string[] = []
+    const url = (blob: Blob) => {
+      const u = URL.createObjectURL(blob)
+      nextUrls.push(u)
+      return u
+    }
     setPhotos(
       photoRecs.map((p) => ({
         id: p.id,
-        url: URL.createObjectURL(p.blob),
-        isDefault: p.id === settings.defaultPhotoId || (photoRecs.length === 1 && !settings.defaultPhotoId),
+        url: url(p.blob),
+        isDefault: p.id === settings.defaultPhotoId,
       }))
     )
-    const tryonRecs = await listTryons()
     setTryons(
       tryonRecs.map((t) => ({
         id: t.id,
-        url: URL.createObjectURL(t.blob),
+        url: url(t.blob),
         createdAt: t.createdAt,
         chained: Boolean(t.parentTryonId),
         source: t.garmentSource,
       }))
     )
+    liveUrls.current.forEach((u) => URL.revokeObjectURL(u))
+    liveUrls.current = nextUrls
   }, [])
 
   useEffect(() => {
-    load().catch((e) => setError((e as Error).message))
-    if (location.hash === '#lookbook') {
-      setTimeout(() => document.getElementById('lookbook')?.scrollIntoView(), 100)
+    load()
+      .catch((e) => setError((e as Error).message))
+      .finally(() => {
+        if (location.hash === '#lookbook') {
+          document.getElementById('lookbook')?.scrollIntoView()
+        }
+      })
+    const urls = liveUrls
+    return () => {
+      urls.current.forEach((u) => URL.revokeObjectURL(u))
+      urls.current = []
     }
   }, [load])
 
@@ -76,23 +97,35 @@ export function Options() {
       setError('That photo is over 10MB — please use a smaller one.')
       return
     }
-    const id = crypto.randomUUID()
-    await putPhoto({ id, createdAt: Date.now(), blob: file })
-    if (photos.length === 0) await setDefaultPhotoId(id)
-    if (fileInput.current) fileInput.current.value = ''
-    load()
+    try {
+      // Downscale once at upload time: Gemini ignores pixels beyond ~1536px,
+      // and the smaller blob keeps every future request fast and within limits.
+      const blob = await normalizeImage(file)
+      const id = crypto.randomUUID()
+      await putPhoto({ id, createdAt: Date.now(), blob })
+      // Storage is the single source of truth for the default photo.
+      if (!(await getSettings()).defaultPhotoId) await setDefaultPhotoId(id)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      if (fileInput.current) fileInput.current.value = ''
+    }
   }
 
   async function makeDefault(id: string) {
     await setDefaultPhotoId(id)
-    load()
+    await load()
   }
 
   async function removePhoto(id: string) {
     await deletePhoto(id)
-    const settings = await getSettings()
-    if (settings.defaultPhotoId === id) await setDefaultPhotoId(null)
-    load()
+    if ((await getSettings()).defaultPhotoId === id) {
+      // Promote the next photo so there's always a default while photos exist.
+      const remaining = await listPhotos()
+      await setDefaultPhotoId(remaining[0]?.id ?? null)
+    }
+    await load()
   }
 
   async function removeTryon(id: string) {

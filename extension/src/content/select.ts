@@ -19,6 +19,7 @@ declare global {
 }
 
 const ACCENT = '#d4351c'
+const MIN_TARGET_PX = 80
 
 function absolute(url: string): string | null {
   try {
@@ -49,30 +50,50 @@ async function toSendableUrl(raw: string): Promise<string | null> {
   return abs && /^https?:$/.test(new URL(abs).protocol) ? abs : null
 }
 
-function garmentSourceFromTarget(target: EventTarget | null): string | null {
-  if (!(target instanceof Element)) return null
-  // Walk up looking for an <img> (or a picture wrapper), then bg images.
-  let el: Element | null = target
-  for (let depth = 0; el && depth < 6; depth++, el = el.parentElement) {
+function sourceFromImg(img: HTMLImageElement): string | null {
+  return resolveImgSource({
+    srcset: img.srcset || undefined,
+    currentSrc: img.currentSrc || undefined,
+    src: img.src || undefined,
+  })
+}
+
+type ImageHit = { source: string; rect: DOMRect }
+
+/**
+ * Find the image actually under the cursor: an <img> in the hit-test stack
+ * first, then a background-image, then (for overlay-covered galleries) the
+ * largest descendant <img> whose box contains the point. The same function
+ * drives both the hover highlight and the click capture, so what's
+ * highlighted is exactly what gets picked.
+ */
+function findImageAt(x: number, y: number): ImageHit | null {
+  const stack = document.elementsFromPoint(x, y)
+
+  for (const el of stack) {
     if (el instanceof HTMLImageElement) {
-      const src = resolveImgSource({
-        srcset: el.srcset || undefined,
-        currentSrc: el.currentSrc || undefined,
-        src: el.src || undefined,
-      })
-      if (src) return src
+      const source = sourceFromImg(el)
+      if (source) return { source, rect: el.getBoundingClientRect() }
     }
-    const inner = el.querySelector?.('img')
-    if (inner instanceof HTMLImageElement) {
-      const src = resolveImgSource({
-        srcset: inner.srcset || undefined,
-        currentSrc: inner.currentSrc || undefined,
-        src: inner.src || undefined,
-      })
-      if (src) return src
-    }
+  }
+
+  for (const el of stack) {
     const bg = extractBgImageUrl(getComputedStyle(el).backgroundImage)
-    if (bg) return bg
+    if (bg) return { source: bg, rect: el.getBoundingClientRect() }
+  }
+
+  for (const el of stack.slice(0, 4)) {
+    let best: (ImageHit & { area: number }) | null = null
+    for (const img of el.querySelectorAll('img')) {
+      const rect = img.getBoundingClientRect()
+      const containsPoint = x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+      if (!containsPoint || rect.width < MIN_TARGET_PX || rect.height < MIN_TARGET_PX) continue
+      const source = sourceFromImg(img)
+      if (source && (!best || rect.width * rect.height > best.area)) {
+        best = { source, rect, area: rect.width * rect.height }
+      }
+    }
+    if (best) return { source: best.source, rect: best.rect }
   }
   return null
 }
@@ -80,7 +101,10 @@ function garmentSourceFromTarget(target: EventTarget | null): string | null {
 // ── selection mode UI ────────────────────────────────────────────────
 let overlay: HTMLDivElement | null = null
 let hint: HTMLDivElement | null = null
+let hintTimer: number | undefined
 let active = false
+let lastX = 0
+let lastY = 0
 
 function ensureOverlay(): HTMLDivElement {
   if (!overlay) {
@@ -100,6 +124,7 @@ function ensureOverlay(): HTMLDivElement {
 }
 
 function showHint(text: string) {
+  clearTimeout(hintTimer) // a stale toast timer must not hide a fresh hint
   if (!hint) {
     hint = document.createElement('div')
     Object.assign(hint.style, {
@@ -128,38 +153,51 @@ function hideHint() {
 
 function toast(text: string) {
   showHint(text)
-  setTimeout(hideHint, 2600)
+  hintTimer = window.setTimeout(hideHint, 2600)
 }
 
-function onMouseMove(e: MouseEvent) {
-  const el = e.target
-  if (!(el instanceof Element)) return
+function highlightAt(x: number, y: number) {
   const box = ensureOverlay()
-  const candidate = garmentSourceFromTarget(el)
-  if (!candidate) {
+  const hit = findImageAt(x, y)
+  if (!hit) {
     box.style.display = 'none'
     return
   }
-  const rect = el.getBoundingClientRect()
   Object.assign(box.style, {
     display: 'block',
-    top: `${rect.top - 3}px`,
-    left: `${rect.left - 3}px`,
-    width: `${rect.width}px`,
-    height: `${rect.height}px`,
+    top: `${hit.rect.top - 3}px`,
+    left: `${hit.rect.left - 3}px`,
+    width: `${hit.rect.width}px`,
+    height: `${hit.rect.height}px`,
   })
+}
+
+function onMouseMove(e: MouseEvent) {
+  lastX = e.clientX
+  lastY = e.clientY
+  highlightAt(lastX, lastY)
+}
+
+function onScroll() {
+  // The fixed-position overlay would drift as the page scrolls under it.
+  highlightAt(lastX, lastY)
+}
+
+// Keep the page from reacting (carousels, menus) while the user is picking.
+function swallow(e: Event) {
+  e.stopPropagation()
 }
 
 async function onClick(e: MouseEvent) {
   e.preventDefault()
   e.stopPropagation()
-  const raw = garmentSourceFromTarget(e.target)
+  const hit = findImageAt(e.clientX, e.clientY)
   exitSelectMode()
-  if (!raw) {
+  if (!hit) {
     toast('No image there — try clicking the product photo')
     return
   }
-  const url = await toSendableUrl(raw)
+  const url = await toSendableUrl(hit.source)
   if (!url) {
     toast("Couldn't read that image — try another one")
     return
@@ -178,9 +216,13 @@ function onKeyDown(e: KeyboardEvent) {
 function enterSelectMode() {
   if (active) return
   active = true
-  document.addEventListener('mousemove', onMouseMove, true)
-  document.addEventListener('click', onClick, true)
-  document.addEventListener('keydown', onKeyDown, true)
+  window.addEventListener('mousemove', onMouseMove, true)
+  window.addEventListener('click', onClick, true)
+  window.addEventListener('keydown', onKeyDown, true)
+  window.addEventListener('scroll', onScroll, { capture: true, passive: true })
+  window.addEventListener('pointerdown', swallow, true)
+  window.addEventListener('mousedown', swallow, true)
+  window.addEventListener('mouseup', swallow, true)
   document.documentElement.style.cursor = 'crosshair'
   showHint('Click the garment you want to try on — Esc to cancel')
 }
@@ -188,9 +230,13 @@ function enterSelectMode() {
 function exitSelectMode() {
   if (!active) return
   active = false
-  document.removeEventListener('mousemove', onMouseMove, true)
-  document.removeEventListener('click', onClick, true)
-  document.removeEventListener('keydown', onKeyDown, true)
+  window.removeEventListener('mousemove', onMouseMove, true)
+  window.removeEventListener('click', onClick, true)
+  window.removeEventListener('keydown', onKeyDown, true)
+  window.removeEventListener('scroll', onScroll, { capture: true })
+  window.removeEventListener('pointerdown', swallow, true)
+  window.removeEventListener('mousedown', swallow, true)
+  window.removeEventListener('mouseup', swallow, true)
   document.documentElement.style.cursor = ''
   if (overlay) overlay.style.display = 'none'
   hideHint()

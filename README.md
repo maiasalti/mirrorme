@@ -21,7 +21,7 @@ any store's product page
 
 ## Install
 
-1. Clone and build (needs Node 20+ and pnpm):
+1. Clone and build (needs Node 20.19+ or 22+, and pnpm):
 
    ```bash
    git clone https://github.com/maiasalti/mirrorme.git && cd mirrorme/extension
@@ -90,8 +90,8 @@ openssl rsa -in key.pem -pubout -outform DER | base64 | tr -d '\n'
 
 An earlier multi-user SaaS build (Next.js backend + Supabase auth/storage +
 server-side Gemini, billing-ready schema) is preserved on the
-[`hosted-saas`](../../tree/hosted-saas) branch, in case MirrorMe ever needs
-accounts and paid plans again.
+[`hosted-saas`](https://github.com/maiasalti/mirrorme/tree/hosted-saas) branch,
+in case MirrorMe ever needs accounts and paid plans again.
 
 ---
 
