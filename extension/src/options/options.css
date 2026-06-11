@@ -187,3 +187,27 @@ body {
   background: var(--accent);
   color: var(--paper);
 }
+
+.page-footer {
+  display: flex;
+  justify-content: space-between;
+  border-top: 1px solid var(--line);
+  margin-top: 48px;
+  padding-top: 18px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.page-footer a {
+  color: var(--ink-soft);
+  text-decoration: none;
+  text-transform: none;
+  letter-spacing: 0.06em;
+}
+
+.page-footer a:hover {
+  color: var(--accent);
+}

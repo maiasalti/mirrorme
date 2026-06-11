@@ -223,6 +223,13 @@ export function Options() {
           Delete everything
         </button>
       </section>
+
+      <footer className="page-footer">
+        <span>MirrorMe</span>
+        <span>
+          Questions? <a href="mailto:maia.salti@gmail.com">maia.salti@gmail.com</a>
+        </span>
+      </footer>
     </div>
   )
 }
