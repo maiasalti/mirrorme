@@ -38,9 +38,12 @@ project for OAuth.
 
 ### 1. Install
 
+All commands in this README run from the repo root (`~/mirrorme`) unless noted:
+
 ```bash
-cd web && pnpm install
-cd ../extension && pnpm install
+cd ~/mirrorme
+(cd web && pnpm install)
+(cd extension && pnpm install)
 ```
 
 ### 2. Supabase project
