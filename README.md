@@ -48,6 +48,10 @@ cd ~/mirrorme
 
 ### 2. Supabase project
 
+> ✅ Already done for this repo: project `mirrorme` (ref `cnuppcuypconmvubgaqg`),
+> schema pushed, keys written to both `.env.local` files. Steps below are for a
+> fresh setup.
+
 1. Create a project at supabase.com → note the **Project URL**, **anon/publishable
    key**, and **service_role/secret key** (Project Settings → API keys).
 2. Apply the schema (creates tables, RLS, and the private `photos` +
@@ -66,8 +70,12 @@ cd ~/mirrorme
 
 **A. Web app sign-in** (Supabase Google provider):
 1. Google Cloud Console → APIs & Services → Credentials → Create OAuth client →
-   type **Web application**. Authorized redirect URI:
-   `https://<project-ref>.supabase.co/auth/v1/callback`.
+   type **Web application**. Authorized redirect URI (this project's literal
+   value — JavaScript origins can stay empty):
+
+   ```
+   https://cnuppcuypconmvubgaqg.supabase.co/auth/v1/callback
+   ```
 2. Supabase Dashboard → Authentication → Sign In / Providers → Google → enable,
    paste this client id + secret.
 3. Supabase → Authentication → URL Configuration: add your web origins
@@ -75,10 +83,13 @@ cd ~/mirrorme
    `<origin>/auth/callback`.
 
 **B. Extension sign-in**:
-1. Build the extension once (step 5) and load it unpacked, or set a stable id
-   first (step 6 — recommended). Note the extension ID from `chrome://extensions`.
+1. The stable extension ID is already pinned (step 6 was done):
+
+   ```
+   lffgkdaknolmfelgjhoiccjocbfjfjkf
+   ```
 2. Create a second OAuth client → type **Chrome Extension** → enter that
-   extension ID.
+   extension ID as the Item ID.
 3. Supabase → Google provider → add this client id to the **Client IDs** (a.k.a.
    Authorized Client IDs) list. If sign-in fails with a nonce error, enable
    **Skip nonce check** on the provider (the id_token flow can't carry one).
