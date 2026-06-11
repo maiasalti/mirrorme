@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { Session } from '@supabase/supabase-js'
-import { ApiError, createTryon, listPhotos, WEB_APP_URL, type Photo } from '../lib/api'
-import { signInWithGoogle, signOut } from '../lib/auth'
+import { getPhoto, getTryon, listPhotos, putTryon } from '../lib/db'
+import { blobToBase64, getGarmentImage } from '../lib/garment'
+import { generateTryOn } from '../lib/gemini'
 import type { PendingGarment } from '../lib/messages'
 import { sendMessage } from '../lib/messages'
-import { supabase } from '../lib/supabase'
+import { getSettings } from '../lib/settings'
 
 type Base =
   | { kind: 'photo'; id: string; url: string }
   | { kind: 'tryon'; id: string; url: string } // chaining: a previous result
 
-type Result = { tryonId: string; resultUrl: string }
+type PhotoView = { id: string; url: string }
+type Result = { id: string; url: string }
+
+const openLookbook = () =>
+  chrome.tabs.create({ url: chrome.runtime.getURL('src/options/index.html#lookbook') })
 
 export function App() {
-  const [session, setSession] = useState<Session | null | undefined>(undefined)
-  const [photos, setPhotos] = useState<Photo[] | null>(null)
+  const [ready, setReady] = useState(false)
+  const [hasKey, setHasKey] = useState(false)
+  const [photos, setPhotos] = useState<PhotoView[]>([])
   const [base, setBase] = useState<Base | null>(null)
   const [pending, setPending] = useState<PendingGarment | null>(null)
   const [autoFailed, setAutoFailed] = useState(false)
@@ -22,37 +27,37 @@ export function App() {
   const [result, setResult] = useState<Result | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // ── session ──────────────────────────────────────────────────────
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => setSession(data.session))
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
-    return () => sub.subscription.unsubscribe()
-  }, [])
+  const load = useCallback(async () => {
+    const settings = await getSettings()
+    setHasKey(Boolean(settings.geminiApiKey))
 
-  // ── photos + persisted chain base ────────────────────────────────
-  const loadPhotos = useCallback(async () => {
-    try {
-      const { photos } = await listPhotos()
-      setPhotos(photos)
-      const stored = await chrome.storage.session.get('baseOverride')
-      const override = stored.baseOverride as Base | undefined
-      if (override) {
-        setBase(override)
-      } else {
-        const def = photos.find((p) => p.isDefault) ?? photos[0]
-        if (def) setBase({ kind: 'photo', id: def.id, url: def.url })
+    const photoRecs = await listPhotos()
+    const views = photoRecs.map((p) => ({ id: p.id, url: URL.createObjectURL(p.blob) }))
+    setPhotos(views)
+
+    const { baseOverride } = await chrome.storage.session.get('baseOverride')
+    const override = baseOverride as { kind: 'tryon'; id: string } | undefined
+    if (override) {
+      const rec = await getTryon(override.id)
+      if (rec) {
+        setBase({ kind: 'tryon', id: rec.id, url: URL.createObjectURL(rec.blob) })
+        setReady(true)
+        return
       }
-    } catch (e) {
-      setError(e instanceof ApiError && e.status === 401 ? null : (e as Error).message)
-      if (e instanceof ApiError && e.status === 401) setSession(null)
-      setPhotos([])
+      await chrome.storage.session.remove('baseOverride')
     }
+    const def =
+      photoRecs.find((p) => p.id === settings.defaultPhotoId) ?? photoRecs[0]
+    if (def) {
+      const view = views.find((v) => v.id === def.id)!
+      setBase({ kind: 'photo', id: view.id, url: view.url })
+    }
+    setReady(true)
   }, [])
 
-  // ── pending garment: read once, auto-detect if absent, then live ──
   useEffect(() => {
-    if (!session) return
-    loadPhotos()
+    load().catch((e) => setError((e as Error).message))
+
     sendMessage<{ pending: PendingGarment | null }>({ type: 'GET_PENDING_GARMENT' }).then(
       (res) => {
         setPending(res?.pending ?? null)
@@ -72,28 +77,41 @@ export function App() {
     }
     chrome.storage.onChanged.addListener(onChange)
     return () => chrome.storage.onChanged.removeListener(onChange)
-  }, [session, loadPhotos])
-
-  // ── actions ──────────────────────────────────────────────────────
-  async function handleSignIn() {
-    setError(null)
-    try {
-      await signInWithGoogle()
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }
+  }, [load])
 
   async function handleTryOn() {
     if (!base || !pending) return
     setError(null)
     setGenerating(true)
     try {
-      const res = await createTryon({
-        garmentImageUrl: pending.url,
-        ...(base.kind === 'photo' ? { basePhotoId: base.id } : { baseTryonId: base.id }),
+      const settings = await getSettings()
+      if (!settings.geminiApiKey) throw new Error('Add your Gemini API key in settings first.')
+
+      const baseRec = base.kind === 'photo' ? await getPhoto(base.id) : await getTryon(base.id)
+      if (!baseRec) throw new Error('Base image is missing — pick another one.')
+
+      const [garment, baseData] = await Promise.all([
+        getGarmentImage(pending.url),
+        blobToBase64(baseRec.blob),
+      ])
+
+      const blob = await generateTryOn({
+        apiKey: settings.geminiApiKey,
+        base: { data: baseData, mimeType: baseRec.blob.type || 'image/jpeg' },
+        garment,
+        chained: base.kind === 'tryon',
       })
-      setResult(res)
+
+      const id = crypto.randomUUID()
+      await putTryon({
+        id,
+        createdAt: Date.now(),
+        garmentSource: pending.url.startsWith('data:') ? 'data:(captured image)' : pending.url,
+        parentTryonId: base.kind === 'tryon' ? base.id : null,
+        basePhotoId: base.kind === 'photo' ? base.id : null,
+        blob,
+      })
+      setResult({ id, url: URL.createObjectURL(blob) })
       setPending(null)
       sendMessage({ type: 'CLEAR_PENDING_GARMENT' }).catch(() => {})
     } catch (e) {
@@ -105,13 +123,12 @@ export function App() {
 
   async function useAsBase() {
     if (!result) return
-    const next: Base = { kind: 'tryon', id: result.tryonId, url: result.resultUrl }
-    setBase(next)
+    setBase({ kind: 'tryon', id: result.id, url: result.url })
     setResult(null)
-    await chrome.storage.session.set({ baseOverride: next })
+    await chrome.storage.session.set({ baseOverride: { kind: 'tryon', id: result.id } })
   }
 
-  async function pickPhotoBase(p: Photo) {
+  async function pickPhotoBase(p: PhotoView) {
     setBase({ kind: 'photo', id: p.id, url: p.url })
     await chrome.storage.session.remove('baseOverride')
   }
@@ -124,47 +141,34 @@ export function App() {
     })
   }
 
-  // ── render ───────────────────────────────────────────────────────
-  if (session === undefined) {
-    return <main className="muted">Loading…</main>
-  }
+  if (!ready) return <main className="muted">Loading…</main>
 
-  if (!session) {
-    return (
-      <>
-        <Header />
-        <main>
-          <h1 className="hero">
-            Wear it <em>before</em> you buy it.
-          </h1>
-          <p className="muted" style={{ marginBottom: 14 }}>
-            Sign in, add a photo of yourself, then click any garment in any store.
-          </p>
-          {error && <p className="error">{error}</p>}
-          <button className="btn" onClick={handleSignIn}>
-            Sign in with Google
-          </button>
-        </main>
-        <Footer />
-      </>
-    )
-  }
+  const needsSetup = !hasKey || photos.length === 0
 
   return (
     <>
-      <Header onSignOut={() => signOut()} />
+      <div className="header">
+        <span className="wordmark">
+          Mirror<em>Me</em>
+        </span>
+        <button onClick={() => chrome.runtime.openOptionsPage()}>Settings</button>
+      </div>
       <main>
         {error && <p className="error">{error}</p>}
 
-        {photos !== null && photos.length === 0 ? (
+        {needsSetup ? (
           <section className="section">
-            <p className="label">First things first</p>
+            <h1 className="hero">
+              Wear it <em>before</em> you buy it.
+            </h1>
             <p className="muted" style={{ marginBottom: 12 }}>
-              Add a photo of yourself so we have someone to dress.
+              {!hasKey
+                ? 'One-time setup: add your free Google Gemini API key and a photo of yourself. Everything stays on your device.'
+                : 'Almost there — add a photo of yourself so we have someone to dress.'}
             </p>
-            <a className="btn" href={`${WEB_APP_URL}/photos`} target="_blank" rel="noreferrer">
-              Add your photo
-            </a>
+            <button className="btn" onClick={() => chrome.runtime.openOptionsPage()}>
+              {!hasKey ? 'Set up MirrorMe' : 'Add your photo'}
+            </button>
           </section>
         ) : (
           <>
@@ -174,7 +178,7 @@ export function App() {
                 {base?.kind === 'tryon' && (
                   <img className="thumb thumb--active" src={base.url} alt="Current look" />
                 )}
-                {photos?.map((p) => (
+                {photos.map((p) => (
                   <button
                     key={p.id}
                     className={`thumb ${base?.kind === 'photo' && base.id === p.id ? 'thumb--active' : ''}`}
@@ -193,19 +197,14 @@ export function App() {
             {result ? (
               <section className="section result">
                 <p className="label">The look</p>
-                <img src={result.resultUrl} alt="Your try-on result" />
+                <img src={result.url} alt="Your try-on result" />
                 <div className="row" style={{ marginTop: 10 }}>
                   <button className="btn btn--accent" onClick={useAsBase}>
                     + Add another piece
                   </button>
-                  <a
-                    className="btn btn--ghost"
-                    href={`${WEB_APP_URL}/history`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Saved to history
-                  </a>
+                  <button className="btn btn--ghost" onClick={openLookbook}>
+                    Saved to lookbook
+                  </button>
                 </div>
               </section>
             ) : (
@@ -227,7 +226,11 @@ export function App() {
                         : 'Looking for the product image… or pick it yourself:'}
                     </p>
                   )}
-                  <button className="btn btn--ghost" style={{ marginTop: 8 }} onClick={startManualSelect}>
+                  <button
+                    className="btn btn--ghost"
+                    style={{ marginTop: 8 }}
+                    onClick={startManualSelect}
+                  >
                     {pending ? 'Pick a different garment' : 'Click the garment on the page'}
                   </button>
                 </section>
@@ -250,29 +253,18 @@ export function App() {
           </>
         )}
       </main>
-      <Footer email={session.user.email} />
+      <div className="footer">
+        <a
+          href="#lookbook"
+          onClick={(e) => {
+            e.preventDefault()
+            openLookbook()
+          }}
+        >
+          My lookbook
+        </a>
+        <span style={{ color: 'var(--ink-soft)' }}>Private by design</span>
+      </div>
     </>
-  )
-}
-
-function Header({ onSignOut }: { onSignOut?: () => void }) {
-  return (
-    <div className="header">
-      <span className="wordmark">
-        Mirror<em>Me</em>
-      </span>
-      {onSignOut && <button onClick={onSignOut}>Sign out</button>}
-    </div>
-  )
-}
-
-function Footer({ email }: { email?: string | null }) {
-  return (
-    <div className="footer">
-      <a href={`${WEB_APP_URL}/history`} target="_blank" rel="noreferrer">
-        My lookbook
-      </a>
-      <span style={{ color: 'var(--ink-soft)' }}>{email ?? 'Private by design'}</span>
-    </div>
   )
 }
