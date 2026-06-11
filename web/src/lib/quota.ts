@@ -6,6 +6,7 @@ import { createAdminClient } from '@/lib/supabase/admin'
  * fields it will need (profiles.plan, trial_ends_at, tryon_count) are already
  * live, so billing drops in here with no migration.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- signature is the Phase 5 contract
 export async function assertWithinQuota(_userId: string): Promise<void> {}
 
 /** Bump the per-user counter after a successful generation (atomic, via RPC). */

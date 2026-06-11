@@ -17,15 +17,17 @@ export function PhotoManager() {
   const [deletingAll, setDeletingAll] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
-  const load = useCallback(async () => {
-    const res = await fetch('/api/photos')
-    if (!res.ok) {
-      setError('Could not load your photos. Try refreshing.')
-      return
-    }
-    const { photos } = await res.json()
-    setPhotos(photos)
-  }, [])
+  const load = useCallback(
+    () =>
+      fetch('/api/photos')
+        .then(async (res) => {
+          if (!res.ok) throw new Error()
+          const { photos } = await res.json()
+          setPhotos(photos)
+        })
+        .catch(() => setError('Could not load your photos. Try refreshing.')),
+    []
+  )
 
   useEffect(() => {
     load()
