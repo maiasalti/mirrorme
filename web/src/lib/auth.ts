@@ -7,17 +7,21 @@ import { createClient } from '@/lib/supabase/server'
  * cookie session. Never trusts a client-supplied user id.
  */
 export async function getUserId(req: Request): Promise<string | null> {
-  const header = req.headers.get('authorization')
-  if (header?.startsWith('Bearer ')) {
-    const jwt = header.slice('Bearer '.length)
-    const { data, error } = await createAdminClient().auth.getClaims(jwt)
-    if (error || !data?.claims?.sub) return null
-    return data.claims.sub
-  }
+  try {
+    const header = req.headers.get('authorization')
+    if (header?.startsWith('Bearer ')) {
+      const jwt = header.slice('Bearer '.length)
+      const { data, error } = await createAdminClient().auth.getClaims(jwt)
+      if (error || !data?.claims?.sub) return null
+      return data.claims.sub
+    }
 
-  const supabase = await createClient()
-  const { data } = await supabase.auth.getClaims()
-  return (data?.claims?.sub as string | undefined) ?? null
+    const supabase = await createClient()
+    const { data } = await supabase.auth.getClaims()
+    return (data?.claims?.sub as string | undefined) ?? null
+  } catch {
+    return null // malformed token / auth server unreachable → not signed in
+  }
 }
 
 export function unauthorized() {
